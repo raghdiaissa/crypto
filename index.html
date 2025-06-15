@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Crypto Engulfing Scanner</title>
+  <style>
+    body { font-family: Arial; padding: 20px; text-align: center; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
+    th { background-color: #f0f0f0; }
+    #status { margin-top: 20px; font-weight: bold; color: #0066cc; }
+    #progress-container {
+      width: 100%; background-color: #ddd; border-radius: 8px; overflow: hidden; margin-top: 15px;
+    }
+    #progress-bar {
+      width: 0%; height: 20px; background-color: #4caf50; text-align: center; color: white;
+    }
+    #timer {
+      font-size: 16px; color: gray; margin-left: 10px;
+    }
+    a { text-decoration: none; color: #007bff; }
+    a:hover { text-decoration: underline; }
+    #autoStatus {
+      margin-top: 10px; color: darkgreen;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>
+    Crypto Scanner
+    <span id="timer"></span>
+  </h2>
+
+  <div style="margin-bottom: 15px;">
+    <label>Timeframe:
+      <select id="interval" onchange="updateCandleTimer()">
+        <option value="1h">1H</option>
+        <option value="4h">4H</option>
+        <option value="1d">1D</option>
+      </select>
+    </label>
+
+    <label style="margin-left: 20px;">Candles:
+      <input type="number" id="engulfMin" value="2" min="1" />
+    </label>
+
+    <label style="margin-left: 20px;">Check:
+      <select id="mode">
+        <option value="now">Now</option>
+        <option value="previous">Previous</option>
+        <option value="any">Any</option>
+      </select>
+    </label>
+
+    <button onclick="scan()">🔍 Scan</button>
+  </div>
+
+  <div style="margin-top:10px;">
+    <label>Auto Scan Interval (min):
+      <input type="number" id="autoInterval" value="10" min="1" style="width: 60px;" />
+    </label>
+    <button onclick="toggleAutoScan()" id="autoBtn">▶️ Start Auto Scan</button>
+    <div id="autoStatus"></div>
+  </div>
+
+  <div id="status"></div>
+
+  <div id="progress-container" style="display: none;">
+    <div id="progress-bar">0%</div>
+  </div>
+
+  <table id="results" style="display:none;">
+    <thead>
+      <tr>
+        <th>Pair</th>
+        <th>Direction</th>
+        <th>Strong / Candles</th>
+        <th>Chart</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    let autoScanIntervalId = null;
+    let autoScanCountdownId = null;
+    let nextScanSeconds = 0;
+
+    async function fetchUsdtPairs() {
+      const res = await fetch("https://api.binance.com/api/v3/exchangeInfo");
+      const data = await res.json();
+      return data.symbols
+        .filter(s => s.symbol.endsWith("USDT") && s.status === "TRADING" && s.quoteAsset === "USDT")
+        .map(s => s.symbol);
+    }
+
+    async function getCandles(symbol, interval) {
+      const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=20`;
+      const res = await fetch(url);
+      return await res.json();
+    }
+
+    function analyzeEngulfing(candles, mode, min) {
+      const range = mode === "now" ? [19] :
+                    mode === "previous" ? [18] :
+                    Array.from({length: 19}, (_, i) => i + 1);
+
+      for (let i of range) {
+        const c = candles[i];
+        const cOpen = parseFloat(c[1]);
+        const cClose = parseFloat(c[4]);
+        const cLow = Math.min(cOpen, cClose);
+        const cHigh = Math.max(cOpen, cClose);
+
+        let count = 0;
+        for (let j = i - 1; j >= 0; j--) {
+          const p = candles[j];
+          const pOpen = parseFloat(p[1]);
+          const pClose = parseFloat(p[4]);
+          const pLow = Math.min(pOpen, pClose);
+          const pHigh = Math.max(pOpen, pClose);
+
+          if (cLow <= pLow && cHigh >= pHigh) {
+            count++;
+          } else {
+            break;
+          }
+        }
+
+        if (count >= min) {
+          return {
+            direction: cClose > cOpen ? "Long" : "Short",
+            count: count
+          };
+        }
+      }
+
+      return null;
+    }
+
+    async function scan() {
+      const interval = document.getElementById("interval").value;
+      const engulfMin = parseInt(document.getElementById("engulfMin").value);
+      const mode = document.getElementById("mode").value;
+
+      const tbody = document.querySelector("#results tbody");
+      const status = document.getElementById("status");
+      const progressBar = document.getElementById("progress-bar");
+      const progressContainer = document.getElementById("progress-container");
+
+      tbody.innerHTML = "";
+      status.innerHTML = "⏳ جاري البحث في جميع أزواج USDT...";
+      document.getElementById("results").style.display = "none";
+      progressBar.style.width = "0%";
+      progressBar.textContent = "0%";
+      progressContainer.style.display = "block";
+
+      const pairs = await fetchUsdtPairs();
+      let completed = 0;
+
+      const allPromises = pairs.map(async (pair) => {
+        try {
+          const candles = await getCandles(pair, interval);
+          const result = analyzeEngulfing(candles, mode, engulfMin);
+          return result ? [pair, result.direction, result.count] : null;
+        } catch {
+          return null;
+        } finally {
+          completed++;
+          const percent = Math.round((completed / pairs.length) * 100);
+          progressBar.style.width = percent + "%";
+          progressBar.textContent = percent + "%";
+        }
+      });
+
+      const results = await Promise.allSettled(allPromises);
+      const matches = results
+        .filter(r => r.status === "fulfilled" && r.value !== null)
+        .map(r => r.value);
+
+      matches.sort((a, b) => b[2] - a[2]);
+
+      if (matches.length > 0) {
+        for (let row of matches) {
+          const [symbol, direction, count] = row;
+
+          const tr = document.createElement("tr");
+
+          const tdSymbol = document.createElement("td");
+          tdSymbol.textContent = symbol;
+          tr.appendChild(tdSymbol);
+
+          const tdDirection = document.createElement("td");
+          tdDirection.textContent = (direction === "Long" ? "🔺 " : "🔻 ") + direction;
+          tr.appendChild(tdDirection);
+
+          const tdCount = document.createElement("td");
+          tdCount.textContent = count;
+          tr.appendChild(tdCount);
+
+          const tdChart = document.createElement("td");
+          const link = document.createElement("a");
+          link.href = `https://www.tradingview.com/chart/?symbol=BINANCE:${symbol}`;
+          link.target = "_blank";
+          link.textContent = "📈 Open Chart";
+          tdChart.appendChild(link);
+          tr.appendChild(tdChart);
+
+          tbody.appendChild(tr);
+        }
+
+        document.getElementById("results").style.display = "table";
+        status.innerHTML = `✅ تم العثور على ${matches.length} نتيجة.`;
+      } else {
+        status.innerHTML = "❌ لم يتم العثور على أي شموع ابتلاعية.";
+      }
+
+      progressBar.textContent = "✅ اكتمل";
+    }
+
+    function toggleAutoScan() {
+      const btn = document.getElementById("autoBtn");
+      const intervalMin = parseInt(document.getElementById("autoInterval").value);
+      const autoStatus = document.getElementById("autoStatus");
+
+      if (autoScanIntervalId) {
+        clearInterval(autoScanIntervalId);
+        clearInterval(autoScanCountdownId);
+        autoScanIntervalId = null;
+        autoScanCountdownId = null;
+        btn.textContent = "▶️ Start Auto Scan";
+        autoStatus.innerHTML = "";
+      } else {
+        scan();
+        nextScanSeconds = intervalMin * 60;
+        autoScanIntervalId = setInterval(() => {
+          scan();
+          nextScanSeconds = intervalMin * 60;
+        }, intervalMin * 60000);
+
+        autoScanCountdownId = setInterval(() => {
+          if (nextScanSeconds > 0) {
+            nextScanSeconds--;
+            const m = Math.floor(nextScanSeconds / 60).toString().padStart(2, '0');
+            const s = (nextScanSeconds % 60).toString().padStart(2, '0');
+            autoStatus.innerHTML = `🔁 التحديث التلقائي خلال: ${m}:${s}`;
+          }
+        }, 1000);
+
+        btn.textContent = "⏸️ Stop Auto Scan";
+      }
+    }
+
+    function getTimeframeSeconds(interval) {
+      const map = {
+        "1h": 3600,
+        "4h": 14400,
+        "1d": 86400
+      };
+      return map[interval] || 3600;
+    }
+
+    function updateCandleTimer() {
+      const interval = document.getElementById("interval").value;
+      const tfSec = getTimeframeSeconds(interval);
+      const now = Math.floor(Date.now() / 1000);
+      const elapsed = now % tfSec;
+      const remaining = tfSec - elapsed;
+
+      const h = Math.floor(remaining / 3600).toString().padStart(2, '0');
+      const m = Math.floor((remaining % 3600) / 60).toString().padStart(2, '0');
+      const s = (remaining % 60).toString().padStart(2, '0');
+
+      document.getElementById("timer").textContent = `(⏳ ${h}:${m}:${s} left)`;
+    }
+
+    setInterval(updateCandleTimer, 1000);
+    updateCandleTimer();
+  </script>
+
+</body>
+</html>
