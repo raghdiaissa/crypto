@@ -53,6 +53,11 @@
       </select>
     </label>
 
+    <label style="margin-left: 20px;">
+      <input type="checkbox" checked id="doubleEngulf" />
+      🔁 Double Engulfing
+    </label>
+
     <button onclick="scan()">🔍 Scan</button>
   </div>
 
@@ -101,7 +106,7 @@
       return await res.json();
     }
 
-    function analyzeEngulfing(candles, mode, min) {
+    function analyzeEngulfing(candles, mode, min, requireDouble = false) {
       const range = mode === "now" ? [19] :
                     mode === "previous" ? [18] :
                     Array.from({length: 19}, (_, i) => i + 1);
@@ -129,6 +134,33 @@
         }
 
         if (count >= min) {
+          if (requireDouble) {
+            const prev = candles[i - 1];
+            if (!prev) continue;
+
+            const prevOpen = parseFloat(prev[1]);
+            const prevClose = parseFloat(prev[4]);
+            const prevLow = Math.min(prevOpen, prevClose);
+            const prevHigh = Math.max(prevOpen, prevClose);
+
+            let prevCount = 0;
+            for (let k = i - 2; k >= 0; k--) {
+              const p = candles[k];
+              const pOpen = parseFloat(p[1]);
+              const pClose = parseFloat(p[4]);
+              const pLow = Math.min(pOpen, pClose);
+              const pHigh = Math.max(pOpen, pClose);
+
+              if (prevLow <= pLow && prevHigh >= pHigh) {
+                prevCount++;
+              } else {
+                break;
+              }
+            }
+
+            if (prevCount < min) continue;
+          }
+
           return {
             direction: cClose > cOpen ? "Long" : "Short",
             count: count
@@ -143,6 +175,7 @@
       const interval = document.getElementById("interval").value;
       const engulfMin = parseInt(document.getElementById("engulfMin").value);
       const mode = document.getElementById("mode").value;
+      const requireDouble = document.getElementById("doubleEngulf").checked;
 
       const tbody = document.querySelector("#results tbody");
       const status = document.getElementById("status");
@@ -162,7 +195,7 @@
       const allPromises = pairs.map(async (pair) => {
         try {
           const candles = await getCandles(pair, interval);
-          const result = analyzeEngulfing(candles, mode, engulfMin);
+          const result = analyzeEngulfing(candles, mode, engulfMin, requireDouble);
           return result ? [pair, result.direction, result.count] : null;
         } catch {
           return null;
